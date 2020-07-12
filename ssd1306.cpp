@@ -20,10 +20,76 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include "font6x8.h"
 #include "mt32synth.h"
 #include "ssd1306.h"
+
+// Compile-time (constexpr) font conversion functions.
+// The SSD1306 stores pixel data in columns, but our source font data is stored as rows.
+// These templated functions generate column-wise versions of our font at compile-time.
+namespace
+{
+	using CharData = u8[8];
+
+	// Iterate through each row of the character data and collect bits for the nth column
+	static constexpr u8 SingleColumn(const CharData& pCharData, u8 pColumn)
+	{
+		u8 bit = 5 - pColumn;
+		u8 column = 0;
+
+		for (u8 i = 0; i < 8; ++i)
+			column |= (pCharData[i] >> bit & 1) << i;
+
+		return column;
+	}
+
+	// Double the height of the character by duplicating column bits into a 16-bit value
+	static constexpr u16 DoubleColumn(const CharData& pCharData, u8 pColumn)
+	{
+		u8 singleColumn = SingleColumn(pCharData, pColumn);
+		u16 column = 0;
+
+		for (u8 i = 0; i < 8; ++i)
+		{
+			bool bit = singleColumn >> i & 1;
+			column |= bit << i * 2 | bit << (i * 2 + 1);
+		}
+
+		return column;
+	}
+
+	// Templated array-like structure with precomputed font data
+	template<size_t N, class F>
+	class Font
+	{
+	public:
+		// Result type of conversion function determines array type
+		using Column = typename std::result_of<F& (const CharData&, u8)>::type;
+		using ColumnData = Column[6];
+
+		constexpr Font(const CharData(&pCharData)[N], F pFunction) : mCharData{ 0 }
+		{
+			for (size_t i = 0; i < N; ++i)
+				for (u8 j = 0; j < 6; ++j)
+					mCharData[i][j] = pFunction(pCharData[i], j);
+		}
+
+		const ColumnData& operator[](size_t i) const { return mCharData[i]; }
+
+	private:
+		ColumnData mCharData[N];
+	};
+
+	// Return number of elements in an array
+	template<class T, size_t N>
+	constexpr size_t ArraySize(const T(&)[N]) { return N; }
+}
+
+// Single and double-height versions of the font
+constexpr auto FontSingle = Font<ArraySize(Font6x8), decltype(SingleColumn)>(Font6x8, SingleColumn);
+constexpr auto FontDouble = Font<ArraySize(Font6x8), decltype(DoubleColumn)>(Font6x8, DoubleColumn);
 
 const u8 CSSD1306::InitSequence[] =
 {
@@ -128,7 +194,7 @@ void CSSD1306::DrawChar(char pChar, u8 pCursorX, u8 pCursorY, bool pInverted, bo
 
 	for (u8 i = 0; i < 6; ++i)
 	{
-		u16 fontColumn = GetDoubleHeightFontColumn(pChar, i);
+		u16 fontColumn = FontDouble[pChar - ' '][i];
 
 		// Don't invert the leftmost column or last two rows
 		if (i > 0 && pInverted)
@@ -229,32 +295,6 @@ void CSSD1306::DrawPartLevels()
 			mFramebuffer[256 + i * 14 + j + 128 + 3] = bottomVal;
 		}
 	}
-}
-
-u8 CSSD1306::GetFontColumn(char pChar, u8 pColumn)
-{
-	size_t fontIndex = pChar - ' ';
-	u8 bit = 5 - pColumn;
-
-	u8 column = 0;
-	for (u8 i = 0; i < 8; ++i)
-		column |= ((FONT_6X8[fontIndex][i] >> bit) & 1) << i;
-
-	return column;
-}
-
-u16 CSSD1306::GetDoubleHeightFontColumn(char pChar, u8 pColumn)
-{
-	u8 fontColumn = GetFontColumn(pChar, pColumn);
-	u16 doubleHeightColumn = 0;
-
-	for (u8 i = 0; i < 8; ++i)
-	{
-		bool bit = (fontColumn >> i) & 1;
-		doubleHeightColumn |= (bit << (i * 2)) | (bit << (i * 2 + 1));
-	}
-
-	return doubleHeightColumn;
 }
 
 void CSSD1306::Print(const char* pText, u8 pCursorX, u8 pCursorY, bool pClearLine, bool pImmediate)
